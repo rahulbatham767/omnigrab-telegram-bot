@@ -20,6 +20,16 @@ const bot = new TelegramBot(token, { polling: true });
 console.log("🤖 OmniGrab Telegram Bot is running...");
 console.log(`🔗 Backend: ${backendUrl}`);
 
+// Register command menu so users see the "/" command list in Telegram's UI
+bot.setMyCommands([
+  { command: 'start',   description: 'Welcome message & how to use' },
+  { command: 'help',    description: 'How to download + FAQ' },
+  { command: 'about',   description: 'About OmniGrab Bot' },
+  { command: 'privacy', description: 'Privacy Policy' },
+  { command: 'terms',   description: 'Terms of Service & Disclaimer' },
+  { command: 'dmca',    description: 'DMCA & Copyright Policy' },
+]).then(() => console.log('✅ Bot commands registered.')).catch(console.error);
+
 // ─── In-Memory Session Store ────────────────────────────────────────────────
 // Stores video info keyed by chatId so we can retrieve it when the user
 // taps a quality button (callback_query).
@@ -97,17 +107,97 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId,
-    `ℹ️ *OmniGrab Bot Help*\n\n` +
-    `*Commands:*\n` +
-    `/start — Welcome message\n` +
-    `/help — Show this help\n\n` +
+    `ℹ️ *OmniGrab Bot — Help*\n\n` +
     `*How to download:*\n` +
-    `1️⃣ Copy a video URL from any site\n` +
-    `2️⃣ Paste it here in the chat\n` +
-    `3️⃣ Choose your preferred quality\n` +
-    `4️⃣ Wait for your file!\n\n` +
-    `⚠️ *Note:* Files larger than 50MB cannot be sent via Telegram bots.`,
+    `1️⃣ Paste any video URL in the chat\n` +
+    `2️⃣ Wait while I analyze the link\n` +
+    `3️⃣ Pick your preferred quality\n` +
+    `4️⃣ Your file arrives right here!\n\n` +
+    `*Supported Sites:*\n` +
+    `YouTube · Instagram · TikTok · Twitter/X · Facebook · Reddit · Twitch · SoundCloud · Vimeo · Dailymotion · and 1000+ more\n\n` +
+    `*Commands:*\n` +
+    `/start — Welcome & intro\n` +
+    `/help — This help page\n` +
+    `/about — About OmniGrab Bot\n` +
+    `/privacy — Privacy Policy\n` +
+    `/terms — Terms of Service\n` +
+    `/dmca — DMCA & Copyright\n\n` +
+    `⚠️ *Limit:* Files over 50MB cannot be sent via Telegram bots. Try a lower quality.`,
     { parse_mode: 'Markdown' }
+  );
+});
+
+// ─── /about command ──────────────────────────────────────────────────────────
+bot.onText(/\/about/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId,
+    `🤖 *About OmniGrab Bot*\n\n` +
+    `OmniGrab Bot is the official Telegram companion to *omnigrab.live* — a free online video and audio downloader powered by yt-dlp.\n\n` +
+    `*Features:*\n` +
+    `• Download from 1000+ sites\n` +
+    `• Choose quality: 4K, 1080p, 720p, 480p, 360p\n` +
+    `• Audio-only download (MP3)\n` +
+    `• Fast, free, no sign-up\n\n` +
+    `*Website:* [omnigrab.live](https://omnigrab.live)\n\n` +
+    `_This is a free bot provided as-is without any warranty. By using it you agree to our /terms._`,
+    { parse_mode: 'Markdown', disable_web_page_preview: true }
+  );
+});
+
+// ─── /privacy command ─────────────────────────────────────────────────────────
+bot.onText(/\/privacy/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId,
+    `🔒 *Privacy Policy*\n_Last updated: April 2025_\n\n` +
+    `*What we collect:*\n` +
+    `• Your Telegram chat ID and username (only to reply to your messages).\n` +
+    `• The URLs you send (processed in real-time, never stored).\n\n` +
+    `*What we DON'T collect:*\n` +
+    `• We do NOT store, log, or share any video URLs you send.\n` +
+    `• We do NOT store downloaded files — all temporary files are deleted immediately after being sent to you.\n` +
+    `• We do NOT sell or share any personal data with third parties.\n\n` +
+    `*Third-party services:*\n` +
+    `This bot uses the OmniGrab backend (omnigrab.live) to extract download links. Please review [omnigrab.live](https://omnigrab.live) for its full privacy policy.\n\n` +
+    `*Contact:* For privacy concerns, contact us via [omnigrab.live](https://omnigrab.live).`,
+    { parse_mode: 'Markdown', disable_web_page_preview: true }
+  );
+});
+
+// ─── /terms command ───────────────────────────────────────────────────────────
+bot.onText(/\/terms/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId,
+    `📋 *Terms of Service & Disclaimer*\n_Last updated: April 2025_\n\n` +
+    `By using OmniGrab Bot, you agree to the following:\n\n` +
+    `*1. Educational Use Only*\n` +
+    `This bot is intended for downloading content that is non-copyrighted, in the public domain, or for which you have explicit permission from the rights holder.\n\n` +
+    `*2. No Piracy*\n` +
+    `You must NOT use this bot to download, reproduce, or distribute copyrighted content without authorization. Doing so may violate copyright laws in your jurisdiction.\n\n` +
+    `*3. No Warranty*\n` +
+    `This bot is provided \"as-is\" without any warranty. We are not liable for any damages, data loss, or legal consequences resulting from use of this bot.\n\n` +
+    `*4. Service Availability*\n` +
+    `We do not guarantee 100% uptime. The bot may be unavailable during maintenance.\n\n` +
+    `*5. Changes*\n` +
+    `These terms may change at any time without notice.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ─── /dmca command ────────────────────────────────────────────────────────────
+bot.onText(/\/dmca/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId,
+    `⚖️ *DMCA & Copyright Policy*\n\n` +
+    `OmniGrab Bot respects intellectual property rights and complies with the Digital Millennium Copyright Act (DMCA).\n\n` +
+    `*Important:*\n` +
+    `• OmniGrab does NOT host, store, or distribute any media content.\n` +
+    `• We only provide a technical tool that extracts publicly available streaming URLs — the actual content is served directly from the original platform's CDN.\n` +
+    `• All downloaded content is the sole responsibility of the user.\n\n` +
+    `*To file a DMCA takedown request:*\n` +
+    `If you believe content accessible through this bot infringes your copyright, please contact us via the OmniGrab website and we will investigate promptly.\n\n` +
+    `📧 *Contact:* [omnigrab.live](https://omnigrab.live/dmca)\n\n` +
+    `_Note: OmniGrab is a technical passthrough service. For takedowns at the source, please contact YouTube, Instagram, TikTok, or the relevant content platform directly._`,
+    { parse_mode: 'Markdown', disable_web_page_preview: true }
   );
 });
 
