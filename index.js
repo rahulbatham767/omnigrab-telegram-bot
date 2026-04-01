@@ -4,149 +4,422 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { Readable } = require('stream');
-const { finished } = require('stream/promises');
 
-// Check for Bot Token
+
+// ─── Config Checks ─────────────────────────────────────────────────────────
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token || token === 'YOUR_TELEGRAM_BOT_TOKEN_HERE') {
   console.error("❌ ERROR: Please set your TELEGRAM_BOT_TOKEN in the .env file.");
   process.exit(1);
 }
 
-const backendUrl = process.env.BACKEND_URL || 'http://localhost:3001';
+const backendUrl = (process.env.BACKEND_URL || 'http://localhost:3001').replace(/\/$/, '');
 
-// Initialize Bot (Long Polling)
+// ─── Bot Init ───────────────────────────────────────────────────────────────
 const bot = new TelegramBot(token, { polling: true });
-console.log("🤖 Telegram Bot is running...");
-console.log(`🔗 Connected to backend at: ${backendUrl}`);
+console.log("🤖 OmniGrab Telegram Bot is running...");
+console.log(`🔗 Backend: ${backendUrl}`);
 
-// Simple Regex to extract the first URL from a message
-const urlRegex = /(https?:\/\/[^\s]+)/g;
+// ─── In-Memory Session Store ────────────────────────────────────────────────
+// Stores video info keyed by chatId so we can retrieve it when the user
+// taps a quality button (callback_query).
+const sessions = new Map(); // chatId -> { url, title, uploader, duration_string, formats }
 
+// ─── Helpers ────────────────────────────────────────────────────────────────
+const urlRegex = /(https?:\/\/[^\s]+)/;
+
+function formatNumber(n) {
+  if (!n) return '';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function truncate(str, max = 200) {
+  if (!str) return '';
+  return str.length > max ? str.substring(0, max) + '…' : str;
+}
+
+// Build a human-friendly quality label for a format object coming from /api/info
+function buildQualityOptions(formats) {
+  const options = [];
+
+  // ── Audio Only ────────────────────────────────────────────────────────────
+  options.push({ label: '🎵 Audio Only (MP3)', audioOnly: true, quality: null });
+
+  // ── Video qualities  (deduplicated, lowest → highest height) ──────────────
+  const heights = [360, 480, 720, 1080, 1440, 2160];
+  const labels = {
+    360:  '📱 Low Quality (360p)',
+    480:  '📺 Standard (480p)',
+    720:  '✨ HD (720p)',
+    1080: '🔥 Full HD (1080p)',
+    1440: '💎 2K (1440p)',
+    2160: '🚀 4K Ultra HD (2160p)',
+  };
+
+  // Collect resolutions actually available in formats
+  const availableHeights = new Set(
+    formats
+      .filter(f => f.has_video)
+      .map(f => {
+        const m = (f.resolution || '').match(/\d+x(\d+)/);
+        return m ? parseInt(m[1]) : null;
+      })
+      .filter(Boolean)
+  );
+
+  for (const h of heights) {
+    // Include if any available height is >= this threshold
+    if ([...availableHeights].some(ah => ah >= h)) {
+      options.push({ label: labels[h], audioOnly: false, quality: h });
+    }
+  }
+
+  return options;
+}
+
+// ─── /start command ─────────────────────────────────────────────────────────
+bot.onText(/\/start/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId,
+    `👋 *Welcome to OmniGrab Bot!*\n\n` +
+    `I can download videos and audio from *1000+ sites* including:\n` +
+    `📺 YouTube  •  📸 Instagram  •  🎵 TikTok  •  🐦 Twitter/X\n` +
+    `📘 Facebook  •  👾 Reddit  •  🎮 Twitch  •  ☁️ SoundCloud\n\n` +
+    `*How to use:*\nSimply paste any video link and I'll take care of the rest!\n\n` +
+    `_Powered by OmniGrab & yt-dlp_`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ─── /help command ──────────────────────────────────────────────────────────
+bot.onText(/\/help/, (msg) => {
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId,
+    `ℹ️ *OmniGrab Bot Help*\n\n` +
+    `*Commands:*\n` +
+    `/start — Welcome message\n` +
+    `/help — Show this help\n\n` +
+    `*How to download:*\n` +
+    `1️⃣ Copy a video URL from any site\n` +
+    `2️⃣ Paste it here in the chat\n` +
+    `3️⃣ Choose your preferred quality\n` +
+    `4️⃣ Wait for your file!\n\n` +
+    `⚠️ *Note:* Files larger than 50MB cannot be sent via Telegram bots.`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// ─── URL Message Handler ─────────────────────────────────────────────────────
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text || '';
 
-  // 1. Try to find a URL in the message
+  // Ignore commands
+  if (text.startsWith('/')) return;
+
   const match = text.match(urlRegex);
   if (!match) {
-    if (text === '/start') {
-      bot.sendMessage(chatId, "Welcome to the Video Downloader Bot! 🎬\n\nJust send me a link from YouTube, Instagram, TikTok, Twitter, etc., and I'll download the video for you.");
-    } else {
-      bot.sendMessage(chatId, "Hi! Send me a valid video URL (like a YouTube or TikTok link) and I'll download it for you. 📥");
-    }
+    bot.sendMessage(chatId,
+      `❓ I didn't recognize that as a video link.\n\nPlease paste a valid URL from YouTube, TikTok, Instagram, Twitter, etc.\n\nType /help for more info.`
+    );
     return;
   }
 
-  const targetUrl = match[0];
+  const targetUrl = match[1];
+  let thinkingMsg;
+
+  try {
+    thinkingMsg = await bot.sendMessage(chatId, '🔍 *Analyzing link...*', { parse_mode: 'Markdown' });
+
+    // ── Fetch video info from backend ─────────────────────────────────────
+    const infoRes = await fetch(`${backendUrl}/api/info`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: targetUrl }),
+    });
+
+    if (!infoRes.ok) {
+      const raw = await infoRes.text();
+      console.error(`[INFO ERROR] ${infoRes.status}: ${raw}`);
+      throw new Error('INFO_FAILED');
+    }
+
+    const info = await infoRes.json();
+    const { title, uploader, view_count, duration_string, description, thumbnail, formats = [] } = info;
+
+    // ── Save session ─────────────────────────────────────────────────────
+    sessions.set(String(chatId), { url: targetUrl, title, uploader, duration_string, formats });
+
+    // ── Build quality options ─────────────────────────────────────────────
+    const qualityOptions = buildQualityOptions(formats);
+
+    // ── Build inline keyboard (2 buttons per row) ─────────────────────────
+    const keyboard = [];
+    for (let i = 0; i < qualityOptions.length; i += 2) {
+      const row = [];
+      for (let j = i; j < Math.min(i + 2, qualityOptions.length); j++) {
+        const opt = qualityOptions[j];
+        const data = opt.audioOnly ? 'dl:audio' : `dl:video:${opt.quality}`;
+        row.push({ text: opt.label, callback_data: data });
+      }
+      keyboard.push(row);
+    }
+    keyboard.push([{ text: '❌ Cancel', callback_data: 'dl:cancel' }]);
+
+    // ── Caption ──────────────────────────────────────────────────────────
+    const viewStr = view_count ? `👁 ${formatNumber(view_count)} views  ` : '';
+    const durStr = duration_string ? `⏱ ${duration_string}` : '';
+    const uploaderStr = uploader ? `\n👤 *${uploader}*` : '';
+    const descStr = description ? `\n\n📝 ${truncate(description, 180)}` : '';
+
+    const caption =
+      `🎬 *${truncate(title, 100)}*${uploaderStr}\n` +
+      `${viewStr}${durStr}${descStr}\n\n` +
+      `*Choose your download format:*`;
+
+    // ── Delete thinking message, send info card ───────────────────────────
+    await bot.deleteMessage(chatId, thinkingMsg.message_id).catch(() => {});
+
+    if (thumbnail) {
+      await bot.sendPhoto(chatId, thumbnail, {
+        caption,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: keyboard },
+      });
+    } else {
+      await bot.sendMessage(chatId, caption, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: keyboard },
+      });
+    }
+
+  } catch (err) {
+    console.error(`[ERROR] analyze: ${err.message}`);
+    if (thinkingMsg) {
+      await bot.editMessageText(
+        `❌ *Failed to analyze this link.*\n\nPlease make sure:\n• The link is publicly accessible\n• The video exists and isn't private`,
+        { chat_id: chatId, message_id: thinkingMsg.message_id, parse_mode: 'Markdown' }
+      ).catch(() => {});
+    }
+  }
+});
+
+// ─── Callback Query Handler (Quality Selection) ──────────────────────────────
+bot.on('callback_query', async (query) => {
+  const chatId = String(query.message.chat.id);
+  const messageId = query.message.message_id;
+  const data = query.data;
+
+  // Acknowledge the button tap
+  await bot.answerCallbackQuery(query.id);
+
+  if (data === 'dl:cancel') {
+    await bot.editMessageCaption('❌ Download cancelled.', {
+      chat_id: chatId,
+      message_id: messageId,
+    }).catch(() => bot.editMessageText('❌ Download cancelled.', { chat_id: chatId, message_id: messageId }));
+    sessions.delete(chatId);
+    return;
+  }
+
+  const session = sessions.get(chatId);
+  if (!session) {
+    await bot.sendMessage(chatId, '⚠️ Session expired. Please send the link again.');
+    return;
+  }
+
+  sessions.delete(chatId);
+
+  const { url, title } = session;
+  const isAudio = data === 'dl:audio';
+  const quality = !isAudio ? parseInt(data.split(':')[2]) : null;
+
+  const qualityLabel = isAudio
+    ? '🎵 Audio (MP3)'
+    : quality === 1080 ? '🔥 Full HD (1080p)'
+    : quality === 720  ? '✨ HD (720p)'
+    : quality === 480  ? '📺 Standard (480p)'
+    : quality === 360  ? '📱 Low Quality (360p)'
+    : `${quality}p`;
+
   let statusMsg;
   let tempDir;
   let downloadedFile;
 
   try {
-    // 2. Notify User
-    statusMsg = await bot.sendMessage(chatId, "⏳ Analyzing link via Backend API...");
+    // Remove inline keyboard from info card
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, {
+      chat_id: chatId, message_id: messageId
+    }).catch(() => {});
 
-    // 3. Setup Temp Directory
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ytdbot-'));
-    downloadedFile = path.join(tempDir, 'download.mp4');
+    statusMsg = await bot.sendMessage(chatId,
+      `⏳ *Downloading ${qualityLabel}...*\n_This might take a moment depending on the file size._`,
+      { parse_mode: 'Markdown' }
+    );
 
-    // 4. Fetch URLs from the Backend API
+    // ── Get CDN URL from backend ─────────────────────────────────────────
+    const urlsPayload = isAudio
+      ? { url, audioOnly: true }
+      : { url, quality, preferMuxed: true };
+
     const urlsRes = await fetch(`${backendUrl}/api/urls`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: targetUrl, quality: 720, preferMuxed: true })
+      body: JSON.stringify(urlsPayload),
     });
 
     if (!urlsRes.ok) {
-        const errObj = await urlsRes.json().catch(() => ({}));
-        throw new Error(errObj.error || "FAILED_EXTRACT");
+      const raw = await urlsRes.text();
+      console.error(`[URLS ERROR] ${urlsRes.status}: ${raw}`);
+      throw new Error('URLS_FAILED');
     }
 
     const urlData = await urlsRes.json();
-    if (!urlData.urls || urlData.urls.length === 0) {
-        throw new Error("FAILED_EXTRACT");
-    }
+    if (!urlData.urls || urlData.urls.length === 0) throw new Error('URLS_EMPTY');
 
     const cdnUrl = urlData.urls[0];
-    console.log(`[DL] API extracted CDN URL for: ${targetUrl}`);
+    console.log(`[DL] Downloading (${qualityLabel}) for chat ${chatId}: ${url}`);
 
-    await bot.editMessageText("📥 Downloading file... This might take a minute.", { chat_id: chatId, message_id: statusMsg.message_id });
+    // ── Stream file via proxy with live progress ───────────────────────────
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'omnigrab-'));
+    const ext = isAudio ? 'mp3' : 'mp4';
+    downloadedFile = path.join(tempDir, `download.${ext}`);
 
-    // 5. Download the file locally using the Backend Proxy (bypasses CORS & User-Agent blocks)
-    const proxyFetchUrl = new URL(`${backendUrl}/api/proxy`);
-    proxyFetchUrl.searchParams.set('url', cdnUrl);
+    const proxyUrl = new URL(`${backendUrl}/api/proxy`);
+    proxyUrl.searchParams.set('url', cdnUrl);
 
-    const fileRes = await fetch(proxyFetchUrl.toString());
-    if (!fileRes.ok) throw new Error("FAILED_DOWNLOAD");
+    const fileRes = await fetch(proxyUrl.toString());
+    if (!fileRes.ok) throw new Error('DOWNLOAD_FAILED');
 
-    // Check size header if available
-    const contentLength = fileRes.headers.get('content-length');
-    if (contentLength && parseInt(contentLength) > 50 * 1024 * 1024) {
-        throw new Error("FILE_TOO_LARGE");
+    const totalBytes = parseInt(fileRes.headers.get('content-length') || '0');
+    if (totalBytes > 50 * 1024 * 1024) throw new Error('FILE_TOO_LARGE');
+
+    // Helper: build a visual progress bar string
+    function buildProgressMsg(received, total, startTime) {
+      const elapsed = (Date.now() - startTime) / 1000; // seconds
+      const speed = elapsed > 0 ? received / elapsed : 0; // bytes/s
+      const speedStr = speed > 1_048_576
+        ? `${(speed / 1_048_576).toFixed(1)} MB/s`
+        : `${(speed / 1024).toFixed(0)} KB/s`;
+
+      if (total > 0) {
+        const pct = Math.min(100, Math.round((received / total) * 100));
+        const filled = Math.round(pct / 10);
+        const bar = '▓'.repeat(filled) + '░'.repeat(10 - filled);
+        const receivedMB = (received / 1_048_576).toFixed(1);
+        const totalMB   = (total   / 1_048_576).toFixed(1);
+        const eta = speed > 0 ? Math.ceil((total - received) / speed) : 0;
+        const etaStr = eta > 60 ? `${Math.floor(eta / 60)}m ${eta % 60}s` : `${eta}s`;
+        return (
+          `📥 *Downloading ${qualityLabel}*\n\n` +
+          `${bar} ${pct}%\n\n` +
+          `📦 ${receivedMB} / ${totalMB} MB\n` +
+          `⚡ ${speedStr}  •  ⏳ ETA: ${etaStr}`
+        );
+      } else {
+        // No content-length — show rolling size + speed
+        const receivedMB = (received / 1_048_576).toFixed(1);
+        return (
+          `📥 *Downloading ${qualityLabel}*\n\n` +
+          `⬇️ ${receivedMB} MB downloaded\n` +
+          `⚡ ${speedStr}`
+        );
+      }
     }
 
-    // Pipe the proxy stream to our local file
-    const dest = fs.createWriteStream(downloadedFile);
-    const bodyStream = Readable.fromWeb(fileRes.body);
-    bodyStream.pipe(dest);
-    await finished(dest);
+    await bot.editMessageText(
+      `📥 *Downloading ${qualityLabel}*\n\n░░░░░░░░░░ 0%\n\n_Starting download..._`,
+      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
+    );
 
-    // 6. Verify final size to ensure it obeys Telegram's 50MB Node.js limit 
-    const stats = fs.statSync(downloadedFile);
-    if (stats.size > 50 * 1024 * 1024 || stats.size === 0) {
-      throw new Error("FILE_TOO_LARGE");
-    }
+    // Manual chunk-by-chunk stream so we can track progress
+    await new Promise((resolve, reject) => {
+      let received = 0;
+      let lastEditAt = 0;
+      const startTime = Date.now();
+      const dest = fs.createWriteStream(downloadedFile);
 
-    // 7. Send the Video to Telegram
-    await bot.editMessageText("📤 Uploading video to Telegram...", { chat_id: chatId, message_id: statusMsg.message_id });
-    
-    await bot.sendVideo(chatId, downloadedFile, {
-      caption: `Downloaded successfully!\n🔗 ${targetUrl}`
+      const bodyStream = Readable.fromWeb(fileRes.body);
+
+      bodyStream.on('data', (chunk) => {
+        received += chunk.length;
+        dest.write(chunk);
+
+        // Update Telegram message at most once every 2.5 seconds (rate-limit safe)
+        const now = Date.now();
+        if (now - lastEditAt > 2500) {
+          lastEditAt = now;
+          bot.editMessageText(
+            buildProgressMsg(received, totalBytes, startTime),
+            { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
+          ).catch(() => {}); // ignore rate-limit errors
+        }
+      });
+
+      bodyStream.on('end', () => dest.end());
+      bodyStream.on('error', reject);
+      dest.on('finish', resolve);
+      dest.on('error', reject);
     });
 
-    // 8. Cleanup temp file and final status message
-    if (fs.existsSync(downloadedFile)) fs.unlinkSync(downloadedFile);
-    if (fs.existsSync(tempDir)) fs.rmdirSync(tempDir);
-    await bot.deleteMessage(chatId, statusMsg.message_id);
-    console.log(`[DL] Success! Sent to chat: ${chatId}`);
+    const stats = fs.statSync(downloadedFile);
+    if (stats.size > 50 * 1024 * 1024 || stats.size === 0) throw new Error('FILE_TOO_LARGE');
+
+    // ── Upload to Telegram ────────────────────────────────────────────────
+    await bot.editMessageText(
+      `📤 *Uploading to Telegram...*`,
+      { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
+    );
+
+    const caption = `✅ *${truncate(title, 80)}*\n📦 ${qualityLabel}\n\n_Downloaded via OmniGrab Bot_`;
+
+    if (isAudio) {
+      await bot.sendAudio(chatId, downloadedFile, { caption, parse_mode: 'Markdown' });
+    } else {
+      await bot.sendVideo(chatId, downloadedFile, { caption, parse_mode: 'Markdown', supports_streaming: true });
+    }
+
+    await bot.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
+    console.log(`[DL] ✅ Success (${qualityLabel}) → chat ${chatId}`);
 
   } catch (err) {
-    console.error(`[ERROR] ${err.message}`);
-    
-    // Attempt Cleanup on Error
-    if (downloadedFile && fs.existsSync(downloadedFile)) fs.unlinkSync(downloadedFile);
-    if (tempDir && fs.existsSync(tempDir)) fs.rmdirSync(tempDir);
+    console.error(`[ERROR] download: ${err.message}`);
 
-    let errorText = "❌ Failed to download the video. Please check the link and try again.";
-    if (err.message === "FILE_TOO_LARGE") {
-      errorText = "❌ This video is too large for Telegram to handle via bots (maximum limit is 50MB).";
-    } else if (err.message.includes("yt-dlp")) {
-       errorText = `❌ Backend Error: ${err.message}`;
+    let errorText = '❌ *Download failed.*\n\nSomething went wrong while downloading. Please try again.';
+    if (err.message === 'FILE_TOO_LARGE') {
+      errorText = '❌ *File Too Large*\n\nThis video exceeds Telegram\'s 50MB limit for bots. Try a lower quality.';
+    } else if (err.message === 'URLS_FAILED' || err.message === 'URLS_EMPTY') {
+      errorText = '❌ *Could not extract download link.*\n\nThe video may be restricted or region-locked. Try another link.';
     }
 
     if (statusMsg) {
-       await bot.editMessageText(errorText, { chat_id: chatId, message_id: statusMsg.message_id }).catch(console.error);
+      await bot.editMessageText(errorText, {
+        chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown'
+      }).catch(() => {});
     } else {
-       await bot.sendMessage(chatId, errorText).catch(console.error);
+      await bot.sendMessage(chatId, errorText, { parse_mode: 'Markdown' });
     }
+  } finally {
+    if (downloadedFile && fs.existsSync(downloadedFile)) fs.unlinkSync(downloadedFile);
+    if (tempDir && fs.existsSync(tempDir)) fs.rmdirSync(tempDir, { recursive: true });
   }
 });
 
-// Render Web Service requires binding to a PORT within 60 seconds
-// We create a dummy HTTP server so Render knows the bot is alive.
+// ─── Health Check HTTP Server (Render.com requirement) ──────────────────────
 const http = require('http');
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('Telegram Bot is running!');
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('OmniGrab Bot is running!');
 }).listen(PORT, () => {
-  console.log(`🌐 Dummy Web Server listening on port ${PORT} for Render Health Checks`);
+  console.log(`🌐 Health server on port ${PORT}`);
 });
 
-// Graceful exit
+// ─── Graceful Exit ───────────────────────────────────────────────────────────
 process.on('SIGINT', () => {
-    console.log("Shutting down bot...");
-    bot.stopPolling();
-    process.exit(0);
+  console.log('\n👋 Shutting down OmniGrab Bot...');
+  bot.stopPolling();
+  process.exit(0);
 });
