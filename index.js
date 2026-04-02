@@ -515,9 +515,9 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`🌐 Health server on port ${PORT}`);
 
-  // ── Self-Ping Keep-Alive ────────────────────────────────────────────────
+  // ── Self-Ping Keep-Alive (Bot) ─────────────────────────────────────────
   // Render free tier suspends services after 15 minutes of inactivity.
-  // We ping our own health endpoint every 14 minutes to stay awake.
+  // We ping our own health endpoint every 5 minutes to stay awake.
   const selfUrl = process.env.RENDER_EXTERNAL_URL;
   if (selfUrl) {
     const pingUrl = `${selfUrl}/`;
@@ -525,16 +525,35 @@ server.listen(PORT, () => {
 
     setInterval(() => {
       prot.get(pingUrl, (res) => {
-        res.resume(); // discard body, we only care about the connection
-        console.log(`[PING] keep-alive → ${res.statusCode}`);
+        res.resume();
+        console.log(`[PING] bot keep-alive → ${res.statusCode}`);
       }).on('error', (err) => {
-        console.warn(`[PING] keep-alive failed: ${err.message}`);
+        console.warn(`[PING] bot keep-alive failed: ${err.message}`);
       });
     }, 5 * 60 * 1000); // every 5 minutes
 
-    console.log(`[PING] Keep-alive scheduled → ${pingUrl}`);
+    console.log(`[PING] Bot keep-alive scheduled → ${pingUrl}`);
   } else {
-    console.log('[PING] RENDER_EXTERNAL_URL not set — keep-alive disabled (local dev mode)');
+    console.log('[PING] RENDER_EXTERNAL_URL not set — bot keep-alive disabled (local dev mode)');
+  }
+
+  // ── Backend Keep-Alive ──────────────────────────────────────────────────
+  // The backend (BACKEND_URL) is a separate Render service that also sleeps.
+  // Bot commands don't need the backend, but URL analysis does.
+  // Pinging it here ensures it stays warm so users never hit a cold start.
+  const backendPingUrl = backendUrl.startsWith('http://localhost') ? null : `${backendUrl}/api/health`;
+  if (backendPingUrl) {
+    const prot2 = backendPingUrl.startsWith('https') ? https : http;
+    setInterval(() => {
+      prot2.get(backendPingUrl, (res) => {
+        res.resume();
+        console.log(`[PING] backend keep-alive → ${res.statusCode}`);
+      }).on('error', (err) => {
+        console.warn(`[PING] backend keep-alive failed: ${err.message}`);
+      });
+    }, 5 * 60 * 1000); // every 5 minutes
+
+    console.log(`[PING] Backend keep-alive scheduled → ${backendPingUrl}`);
   }
 });
 
