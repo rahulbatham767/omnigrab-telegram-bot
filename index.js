@@ -50,6 +50,19 @@ function truncate(str, max = 200) {
   return str.length > max ? str.substring(0, max) + '…' : str;
 }
 
+// Escape Telegram Markdown v1 special characters in dynamic content
+// so that user-supplied strings (titles, descriptions) never break the parser.
+function esc(str) {
+  if (!str) return '';
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/\*/g, '\\*')
+    .replace(/_/g,  '\\_')
+    .replace(/`/g,  '\\`')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
+}
+
 // Build a human-friendly quality label for a format object coming from /api/info
 function buildQualityOptions(formats) {
   const options = [];
@@ -263,14 +276,14 @@ bot.on('message', async (msg) => {
     }
     keyboard.push([{ text: '❌ Cancel', callback_data: 'dl:cancel' }]);
 
-    // ── Caption ──────────────────────────────────────────────────────────
-    const viewStr = view_count ? `👁 ${formatNumber(view_count)} views  ` : '';
-    const durStr = duration_string ? `⏱ ${duration_string}` : '';
-    const uploaderStr = uploader ? `\n👤 *${uploader}*` : '';
-    const descStr = description ? `\n\n📝 ${truncate(description, 180)}` : '';
+    // ── Caption ───────────────────────────────────────────────────────────────
+    const viewStr    = view_count ? `👁 ${formatNumber(view_count)} views  ` : '';
+    const durStr     = duration_string ? `⏱ ${duration_string}` : '';
+    const uploaderStr = uploader ? `\n👤 *${esc(uploader)}*` : '';
+    const descStr    = description ? `\n\n📝 ${esc(truncate(description, 180))}` : '';
 
     const caption =
-      `🎬 *${truncate(title, 100)}*${uploaderStr}\n` +
+      `🎦 *${esc(truncate(title, 100))}*${uploaderStr}\n` +
       `${viewStr}${durStr}${descStr}\n\n` +
       `*Choose your download format:*`;
 
@@ -468,7 +481,7 @@ bot.on('callback_query', async (query) => {
       { chat_id: chatId, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
     );
 
-    const caption = `✅ *${truncate(title, 80)}*\n📦 ${qualityLabel}\n\n_Downloaded via OmniGrab Bot_`;
+    const caption = `✅ *${esc(truncate(title, 80))}*\n📦 ${qualityLabel}\n\n_Downloaded via OmniGrab Bot_`;
 
     if (isAudio) {
       await bot.sendAudio(chatId, downloadedFile, { caption, parse_mode: 'Markdown' });
