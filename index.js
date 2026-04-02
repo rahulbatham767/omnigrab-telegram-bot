@@ -92,15 +92,20 @@ function buildQualityOptions(formats) {
 // ─── /start command ─────────────────────────────────────────────────────────
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId,
+  
+  const welcomeMessage = 
     `👋 *Welcome to OmniGrab Bot!*\n\n` +
     `I can download videos and audio from *1000+ sites* including:\n` +
     `📺 YouTube  •  📸 Instagram  •  🎵 TikTok  •  🐦 Twitter/X\n` +
     `📘 Facebook  •  👾 Reddit  •  🎮 Twitch  •  ☁️ SoundCloud\n\n` +
     `*How to use:*\nSimply paste any video link and I'll take care of the rest!\n\n` +
-    `_Powered by OmniGrab & yt-dlp_`,
-    { parse_mode: 'Markdown' }
-  );
+    `⚠️ *Limit:* Files over 50MB cannot be sent via Telegram bots. Try our official website [omnigrab.live](https://omnigrab.live) for downloading videos up to 8K without any limitations!\n\n` +
+    `_Powered by OmniGrab_`;
+
+  bot.sendMessage(chatId, welcomeMessage, { 
+    parse_mode: 'Markdown',
+    disable_web_page_preview: false 
+  });
 });
 
 // ─── /help command ──────────────────────────────────────────────────────────
