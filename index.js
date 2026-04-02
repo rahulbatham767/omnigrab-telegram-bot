@@ -499,12 +499,38 @@ bot.on('callback_query', async (query) => {
 
 // ─── Health Check HTTP Server (Render.com requirement) ──────────────────────
 const http = require('http');
+const https = require('https');
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
+
+const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('OmniGrab Bot is running!');
-}).listen(PORT, () => {
+});
+
+server.listen(PORT, () => {
   console.log(`🌐 Health server on port ${PORT}`);
+
+  // ── Self-Ping Keep-Alive ────────────────────────────────────────────────
+  // Render free tier suspends services after 15 minutes of inactivity.
+  // We ping our own health endpoint every 14 minutes to stay awake.
+  const selfUrl = process.env.RENDER_EXTERNAL_URL;
+  if (selfUrl) {
+    const pingUrl = `${selfUrl}/`;
+    const prot = pingUrl.startsWith('https') ? https : http;
+
+    setInterval(() => {
+      prot.get(pingUrl, (res) => {
+        res.resume(); // discard body, we only care about the connection
+        console.log(`[PING] keep-alive → ${res.statusCode}`);
+      }).on('error', (err) => {
+        console.warn(`[PING] keep-alive failed: ${err.message}`);
+      });
+    }, 14 * 60 * 1000); // every 14 minutes
+
+    console.log(`[PING] Keep-alive scheduled → ${pingUrl}`);
+  } else {
+    console.log('[PING] RENDER_EXTERNAL_URL not set — keep-alive disabled (local dev mode)');
+  }
 });
 
 // ─── Graceful Exit ───────────────────────────────────────────────────────────
