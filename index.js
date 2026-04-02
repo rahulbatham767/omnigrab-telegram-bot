@@ -530,7 +530,7 @@ server.listen(PORT, () => {
       }).on('error', (err) => {
         console.warn(`[PING] keep-alive failed: ${err.message}`);
       });
-    }, 14 * 60 * 1000); // every 14 minutes
+    }, 5 * 60 * 1000); // every 5 minutes
 
     console.log(`[PING] Keep-alive scheduled → ${pingUrl}`);
   } else {
