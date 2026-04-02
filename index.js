@@ -98,7 +98,9 @@ bot.onText(/\/start/, (msg) => {
     `📺 YouTube  •  📸 Instagram  •  🎵 TikTok  •  🐦 Twitter/X\n` +
     `📘 Facebook  •  👾 Reddit  •  🎮 Twitch  •  ☁️ SoundCloud\n\n` +
     `*How to use:*\nSimply paste any video link and I'll take care of the rest!\n\n` +
-    `_Powered by OmniGrab & yt-dlp_`,
+    `_Powered by OmniGrab`,
+    `⚠️ *Limit:* Files over 50MB cannot be sent via Telegram bots. Try official website omnigrab.live for downloading videos upto 8k without any limitations`,
+
     { parse_mode: 'Markdown' }
   );
 });
